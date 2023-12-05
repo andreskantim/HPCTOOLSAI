@@ -1,0 +1,86 @@
+Lab AI - HPC Tools por Andrés Herrero Sanz y Sonsoles B. Pérez Jiménez 
+----------------------------------------------------------------------
+
+*BASELINE IMPLEMENTATION*
+
+El tiempo de entrenamiento para el modelo en una única GPU A100 y para 15 epochs es de 3m6.619s
+
+*DISTRIBUTED IMPLEMENTATION*
+
+Los tiempos medidos para 15 epochs con las diferentes estrategias son
+
+       +-------------+-------------+---------------+---------------+-------------------+
+       |      DP     |     DDP     |      FSDP     |   Deepspeed   | Deepspeed_stage_3 |
++------+-------------+-------------+---------------+---------------+-------------------+
+|   1  |  13m11.958s |  1m41.687s  |    1m46.209s  |   3m37.511s   |     9m41.591s     |
++------+-------------+-------------+---------------+---------------+-------------------+
+|   2  |  2m49.820s  |  1m42.237s  |   1m44.632s   |   2m54.645s   |     9m42.120s     |       
++------+-------------+-------------+---------------+---------------+-------------------+
+|   3  |  10m47.531s |  0m57.222s  |   0m59.425s   |   1m45.652s   |         -         |     
++------+-------------+-------------+---------------+---------------+-------------------+
+
+Los diferentes casos que estudiamos, así como las modificaciones de los parámetros que hacemos en el script sbatch.sh que lanzamos para cada uno, son:
+1. 1 nodo, 2GPUs
+	#SBATCH --nodes=1               
+	#SBATCH --ntasks-per-node=2    
+	#SBATCH --gres=gpu:a100:2          
+	#SBATCH -c 32  
+2. 2 nodos, 1 GPU cada uno
+	#SBATCH --nodes=2               
+	#SBATCH --ntasks-per-node=1    
+	#SBATCH --gres=gpu:a100:1          
+	#SBATCH -c 32        
+3. 2 nodos, 2 GPUs cada uno
+	#SBATCH --nodes=2               
+	#SBATCH --ntasks-per-node=2    
+	#SBATCH --gres=gpu:a100:2          
+	#SBATCH -c 32 
+
+Vamos a describir brevemente en qué consisten las diferentes estrategias utilizadas:
+
+-> Data Parallel (DP): La misma configuración se replica varias veces, y cada una recibe una porción de los datos. El procesamiento se realiza en paralelo y todas las configuraciones se sincronizan al final de cada paso de entrenamiento. Tiene la limitación de que sólo es válida cuando tenemos 1 nodo y varias GPUs, y aun así es siempre más lenta que la DDP para este escenario.
+-> Distributed Data Parallel (DDP): El modelo se replica en cada GPU y cada copia se entrena con una porción distinta del dataset. Los gradientes calculados se intercambian entre GPUs para que todos tengan un valor igual y actualizado de los pesos (operación all-reduce)
+-> Fully Shared Data Parallel (FSDP): Distribuye los parámetros del modelo entre las GPUs. De esta manera, evita la limitación existente sobre la memoria de las GPUs en las estrategias DP y DDP
+-> Deepspeed: equivale al ZeRO-DP. Cada GPU guarda sólo una porción del modelo. Así, se reduce el consumo de memoria de cada GPU al dividir los tres estados de entrenamiento del modelo (pesos, gradientes y estados del optimizador) entre los procesos de paralelismo de datos en lugar de replicarlos.
+-> Deepspeed_stage_3: Es una variación del anterior. Se ha usado por completitud, pero sus resultados no nos han parecido muy representativos, por lo que no se comentarán en adelante.
+
+Hemos estudiado dos casos: Un nodo con varias GPUs (caso 1) y varios nodos con varias GPUs (casos 2 y 3).
+
+*ANÁLISIS DE RESULTADOS*
+
+Tras la ejecución del modelo con las diferentes estrategias, notamos lo siguiente:
+
+- DP no mejora el tiempo de ejecución respecto a una única GPU. Esto es llamativo, y suponemos que puede deberse a algún error en la configuración o en el desarrollo de la estrategia con fabric.
+- DDP es notablemente más rápida que DP en la única situación para la cual DP es aplicable (caso 1). Comprobamos así lo que se ha visto en las clases teóricas.
+- DDP es la estrategia más rápida en cualquier escenario, aunque la diferencia no es muy grande respecto a la FSDP.
+- La principal ventaja que trae FSDP o Deepspeed no se aprovecha en nuestro caso, puesto que el modelo completo entra en la memoria de una sola GPU. Así, la mejor estrategia para nuestro modelo es la DDP.
+- Para Deepspeed en el caso 1 no se genera speedup respecto a 1 GPU, por lo que concluimos que no merece la pena esta implementación en esta situación.
+- En general, se obtienen mayores mejoras en el caso 2 que en el 1.
+- FSDP es consderablemente más rápido que Deepspeed en cualquier caso, de forma que si el modelo no cupiera en una GPU, sería la primera estrategia a intentar implementar.
+- El speedup respecto a la baseline se recoge en la siguiente tabla:
+
+       +-------------+-------------+---------------+
+       |     DDP     |    FSDP     |   Deepspeed   | 
++------+-------------+-------------+---------------+
+|   1  |    1,835    | 	  1,757	   |     0,858	   |   	  	        	     
++------+-------------+-------------+---------------+
+|   2  |    1,825    | 	  1,784    |     1,068	   |   	  	   
++------+-------------+-------------+---------------+
+|   3  |    3,26     |    3,140	   |     1,766	   |   	  	    
++------+-------------+-------------+---------------+
+
+- La eficiencia de cada estrategia (speedup/aumento_GPU) para cada caso es: 
+       +-------------+-------------+---------------+
+       |     DDP     |    FSDP     |   Deepspeed   | 
++------+-------------+-------------+---------------+
+|   1  |    0,918    | 	  0,874	   |     0,427	   |   	  	        	     
++------+-------------+-------------+---------------+
+|   2  |    0,913    | 	  0,892    |     0,539	   |   	  	   
++------+-------------+-------------+---------------+
+|   3  |    0,815    |    0,785	   |     0,442	   |   	  	    
++------+-------------+-------------+---------------+
+
+- Tanto la eficiencia de DDP como la de FSDP son buenas en todos los casos, siendo ligeramente mejores para 2 GPUs que para 4.
+- La eficiencia de Deepspeed es bastante mediocre en todos los casos, si bien es capaz de mostrar una ligero speedup para 4 GPUs. 
+
+Finalmente, comentar que se intentó implementar el uso de TensorBoard, pero por problemas de compatibilidad con las versiones de los distintos software usados (y una ligera falta de tiempo) no hemos podido incluirlo.
